@@ -1,172 +1,266 @@
-/**
- * S.P.A.R.T Local Development Server with Gemini API Proxy
- * Zero external dependencies. Uses Node.js built-in 'http', 'https', and 'fs'.
- */
-
 const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-// Auto-load .env file if present
-const envPath = path.join(__dirname, '.env');
-if (fs.existsSync(envPath)) {
-  const envContent = fs.readFileSync(envPath, 'utf8');
-  envContent.split(/\r?\n/).forEach(line => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) return;
-    const match = trimmed.match(/^([\w.-]+)\s*=\s*(.*)?$/);
-    if (match) {
-      const key = match[1];
-      let val = (match[2] || '').trim();
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1);
-      }
-      process.env[key] = val;
-    }
-  });
-}
-
 const PORT = process.env.PORT || 3000;
-const PUBLIC_DIR = __dirname;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || 'AQ.Ab8RN6I5DNzddl4yRvwjTeULQRI34PIBaNDPEN6YQLqG2h-1Fw';
 
 const MIME_TYPES = {
-  '.html': 'text/html; charset=UTF-8',
-  '.css': 'text/css; charset=UTF-8',
-  '.js': 'application/javascript; charset=UTF-8',
-  '.json': 'application/json; charset=UTF-8',
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
-  '.wav': 'audio/wav',
-  '.mp3': 'audio/mpeg'
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff'
 };
 
-function queryGemini(prompt, userName, mode, callback) {
-  if (!GEMINI_API_KEY) {
-    callback(new Error('No GEMINI_API_KEY configured in environment or .env file.'));
-    return;
-  }
+// Calls Google Gemini API
+function callGeminiAPI(prompt, mode, userName) {
+  return new Promise((resolve, reject) => {
+    // Select persona instructions based on mode
+    let systemInstruction = `You are S.P.A.R.T (Smart Perpetual Assistant for Research Tasks), an advanced, dignified, highly knowledgeable and polite male AI assistant. The user's name is ${userName || 'User'}.
+Your responses must be directly and specifically tailored to the user's exact question without repetitive boilerplate.
+Provide authoritative, accurate, well-structured answers using clean markdown (clear headings, bullet points, bold key terms, and code blocks with language tags when programming is involved).
+Never give generic canned answers. Address the exact specific subject, constraints, and details the user asked about.`;
 
-  const systemPrompt = `You are S.P.A.R.T (Smart Perpetual Assistant for Research Tasks), an advanced, highly articulate, polite, and respectful autonomous research AI assistant.
-The user's name is ${userName || 'Researcher'}. Current Research Mode: ${mode || 'general'}.
+    const lowerPrompt = (prompt || '').toLowerCase();
+    const isStudy = mode === 'study' || lowerPrompt.includes('study') || lowerPrompt.includes('quiz') || lowerPrompt.includes('flashcard') || lowerPrompt.includes('feynman') || lowerPrompt.includes('exam') || lowerPrompt.includes('syllabus');
+    const isCareer = mode === 'career' || lowerPrompt.includes('career') || lowerPrompt.includes('resume') || lowerPrompt.includes('interview') || lowerPrompt.includes('job') || lowerPrompt.includes('salary') || lowerPrompt.includes('promotion');
 
-Guidelines:
-1. Always maintain a well-mannered, respectful, courteous, and intellectual tone. Address the user politely.
-2. Provide accurate, clear, factual, and scientifically grounded responses.
-3. Structure your response with clean formatting, bullet points, and sections when appropriate.
-4. Keep the initial sentence or two concise, natural, and clear so it sounds wonderful when read aloud by text-to-speech.`;
-
-  const payload = JSON.stringify({
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: systemPrompt + '\n\nUser Question/Request: "' + prompt + '"' }
-        ]
-      }
-    ],
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 1000
+    if (isStudy) {
+      systemInstruction += `\n[Study Intelligence Activated]: Prioritize active recall, intuitive analogies (Feynman technique), step-by-step logic, and high-retention study guidance. Provide structured quizzes or flashcards if requested. Always ensure results are deeply accurate, well-mannered, and conclude with a concise spoken summary.`;
+    } else if (isCareer) {
+      systemInstruction += `\n[Career Intelligence Activated]: Provide executive-level career advice, tier-1 ATS resume audits (Google XYZ formula: Accomplished [X] as measured by [Y] by doing [Z]), STAR behavioral interview techniques, and strategic negotiation scripts. Keep the tone dignified, supportive, and well-mannered.`;
     }
-  });
 
-  const model = 'gemini-3.5-flash-lite';
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+    const fullPrompt = `${systemInstruction}\n\nUser Question:\n${prompt}`;
 
-  const req = https.request(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(payload)
-    },
-    timeout: 12000
-  }, (res) => {
-    let body = '';
-    res.on('data', chunk => body += chunk);
-    res.on('end', () => {
-      try {
-        const json = JSON.parse(body);
-        if (json.candidates && json.candidates[0] && json.candidates[0].content && json.candidates[0].content.parts[0]) {
-          const fullText = json.candidates[0].content.parts[0].text;
-          callback(null, fullText);
-        } else if (json.error) {
-          callback(new Error(json.error.message || 'Gemini API Error'));
-        } else {
-          callback(new Error('Unexpected response format from Gemini'));
-        }
-      } catch (err) {
-        callback(err);
+    const postData = JSON.stringify({
+      contents: [{ parts: [{ text: fullPrompt }] }],
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 2048
       }
     });
-  });
 
-  req.on('error', err => callback(err));
-  req.on('timeout', () => {
-    req.destroy();
-    callback(new Error('Gemini API request timed out'));
-  });
+    // Fast and confirmed active models for Google Gemini
+    const models = ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash-latest'];
 
-  req.write(payload);
-  req.end();
+    function attemptModel(modelIndex) {
+      if (modelIndex >= models.length) {
+        return reject(new Error('All Gemini models failed or timed out.'));
+      }
+
+      const modelName = models[modelIndex];
+      const req = https.request({
+        hostname: 'generativelanguage.googleapis.com',
+        path: `/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`,
+        method: 'POST',
+        timeout: 9000,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      }, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            try {
+              const parsed = JSON.parse(body);
+              const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (text && text.trim().length > 0) {
+                return resolve(text);
+              }
+            } catch (e) {}
+          }
+          // Retry next model if 404, 503 or 429
+          attemptModel(modelIndex + 1);
+        });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        attemptModel(modelIndex + 1);
+      });
+
+      req.on('error', () => {
+        attemptModel(modelIndex + 1);
+      });
+
+      req.write(postData);
+      req.end();
+    }
+
+    attemptModel(0);
+  });
 }
 
-const server = http.createServer((req, res) => {
-  // Handle API route: /api/ask
-  if (req.method === 'POST' && req.url === '/api/ask') {
-    let raw = '';
-    req.on('data', chunk => raw += chunk);
-    req.on('end', () => {
-      try {
-        const data = JSON.parse(raw);
-        const prompt = data.prompt;
-        const userName = data.userName || 'Researcher';
-        const mode = data.mode || 'general';
+// Function to transcribe audio data using Gemini Multimodal Audio (supports English & Tamil)
+function transcribeAudioWithGemini(base64Audio, mimeType, language) {
+  return new Promise((resolve, reject) => {
+    const isTamil = Boolean(language && language.toLowerCase().includes('ta'));
+    const langPrompt = isTamil 
+      ? 'Transcribe this Tamil speech audio into Tamil script with high accuracy. Return only the exact transcribed Tamil words with punctuation. Do not add any conversational preamble.'
+      : 'Transcribe this speech audio into accurate English text. Return only the exact transcribed speech text with correct punctuation, and no conversational preamble or quotes.';
 
-        if (!prompt) {
+    const postData = JSON.stringify({
+      contents: [{
+        parts: [
+          { text: langPrompt },
+          { inlineData: { mimeType: mimeType || 'audio/webm', data: base64Audio } }
+        ]
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 1024
+      }
+    });
+
+    const models = ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-flash-latest'];
+
+    function attemptAudioModel(idx) {
+      if (idx >= models.length) {
+        return reject(new Error('All transcription models failed or timed out.'));
+      }
+      const modelName = models[idx];
+      const req = https.request({
+        hostname: 'generativelanguage.googleapis.com',
+        path: `/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`,
+        method: 'POST',
+        timeout: 12000,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(postData)
+        }
+      }, (res) => {
+        let body = '';
+        res.on('data', chunk => body += chunk);
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            try {
+              const parsed = JSON.parse(body);
+              const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (text && text.trim()) return resolve(text.trim());
+            } catch (e) {}
+          }
+          attemptAudioModel(idx + 1);
+        });
+      });
+
+      req.on('timeout', () => { req.destroy(); attemptAudioModel(idx + 1); });
+      req.on('error', () => attemptAudioModel(idx + 1));
+      req.write(postData);
+      req.end();
+    }
+
+    attemptAudioModel(0);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
+  const pathname = parsedUrl.pathname;
+
+  // 1. API Route: POST /api/transcribe (Audio Speech-to-Text)
+  if (req.method === 'POST' && pathname === '/api/transcribe') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const audioBase64 = payload.audio || payload.audioData || '';
+        const mimeType = payload.mimeType || 'audio/webm';
+        const language = payload.language || 'en-IN';
+
+        if (!audioBase64) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Missing prompt' }));
+          res.end(JSON.stringify({ success: false, error: 'Audio data required' }));
           return;
         }
 
-        queryGemini(prompt, userName, mode, (err, answer) => {
-          if (err) {
-            console.warn('Gemini proxy error:', err.message);
-            res.writeHead(502, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: err.message }));
-            return;
-          }
-
-          res.writeHead(200, {
-            'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*'
-          });
-          res.end(JSON.stringify({ success: true, text: answer }));
-        });
+        try {
+          const transcript = await transcribeAudioWithGemini(audioBase64, mimeType, language);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, text: transcript, transcript: transcript }));
+        } catch (sttErr) {
+          console.warn('Gemini audio transcription error:', sttErr.message);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: sttErr.message }));
+        }
       } catch (e) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON request' }));
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON payload' }));
       }
     });
     return;
   }
 
-  // Handle Static files
-  let reqPath = req.url.split('?')[0];
-  if (reqPath === '/' || reqPath === '') {
-    reqPath = '/index.html';
+  // 2. API Route: POST /api/chat
+  if (req.method === 'POST' && pathname === '/api/chat') {
+    let body = '';
+    req.on('data', chunk => body += chunk);
+    req.on('end', async () => {
+      try {
+        const payload = JSON.parse(body || '{}');
+        const userPrompt = payload.prompt || '';
+        const mode = payload.mode || 'general';
+        const userName = payload.userName || 'Devadharshini';
+
+        if (!userPrompt.trim()) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Prompt is required' }));
+          return;
+        }
+
+        try {
+          const aiResponse = await callGeminiAPI(userPrompt, mode, userName);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: true,
+            text: aiResponse,
+            source: 'gemini-live'
+          }));
+        } catch (apiErr) {
+          console.warn('Gemini live call timed out or failed, returning dynamic intelligence:', apiErr.message);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            success: false,
+            error: apiErr.message,
+            source: 'fallback'
+          }));
+        }
+      } catch (parseErr) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON payload' }));
+      }
+    });
+    return;
   }
 
-  const safePath = path.normalize(reqPath).replace(/^(\.\.[\/\\])+/, '');
-  const filePath = path.join(PUBLIC_DIR, safePath);
+  // 2. Static File Serving
+  let reqPath = pathname;
+  if (reqPath === '/') reqPath = '/index.html';
+
+  const filePath = path.join(__dirname, reqPath);
+
+  // Prevent path traversal
+  if (!filePath.startsWith(__dirname)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('403 Forbidden');
+    return;
+  }
 
   fs.stat(filePath, (err, stats) => {
     if (err || !stats.isFile()) {
       res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('404 Not Found: ' + reqPath);
+      res.end('404 Not Found');
       return;
     }
 
@@ -175,7 +269,7 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(200, {
       'Content-Type': contentType,
-      'Cache-Control': 'no-cache, no-store, must-revalidate'
+      'Cache-Control': 'no-cache'
     });
 
     const stream = fs.createReadStream(filePath);
@@ -184,9 +278,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`=======================================================`);
-  console.log(` S.P.A.R.T Autonomous Voice Research Assistant Server `);
-  console.log(` Powered by Gemini API`);
-  console.log(` Running at: http://localhost:${PORT}`);
-  console.log(`=======================================================`);
+  console.log(`S.P.A.R.T Server running with Gemini API Key on http://localhost:${PORT}`);
 });
